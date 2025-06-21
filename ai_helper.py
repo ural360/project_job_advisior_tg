@@ -1,96 +1,79 @@
 import aiohttp
 import logging
-from typing import List, Dict, Optional, Tuple
-from openai import OpenAI
+from typing import List, Tuple
+from config import HF_TOKEN
 
 class AIHelper:
     def __init__(self):
         self.session = None
-        self.services = {
-            'huggingface': {
-                'url': 'https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1',
-                'headers': {'Authorization': 'Bearer your_hugging_face_api'},  
-                'free': True
-            }
-        }
+        self.hf_url = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
+        self.headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-    async def initialize(self):
-        self.session = aiohttp.ClientSession()
-
-    async def get_ai_response(self, prompt: str) -> Tuple[str, str]:
-        """Универсальный метод для запросов к ИИ"""
-        for name, config in self.services.items():
-            if not config['free']:
-                continue
-                
-            try:
-                payload = {
-                    "inputs": prompt if name == 'huggingface' else "",
-                    "messages": [{"role": "user", "content": prompt}] if name != 'huggingface' else None
-                }
-
-                async with self.session.post(
-                    config['url'],
-                    json=payload if name == 'huggingface' else {"messages": [{"role": "user", "content": prompt}]},
-                    headers=config.get('headers', {}),
-                    timeout=30
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return self._parse_response(name, data), name
-                    else:
-                        error = await resp.text()
-                        logging.error(f"Ошибка {name} API: {resp.status} - {error}")
-            except Exception as e:
-                logging.warning(f"Ошибка подключения к {name}: {str(e)}")
+    async def ensure_session(self):
         
-        return self._local_fallback(prompt), "local"
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
+            logging.info("Сессия aiohttp создана")
 
-    async def get_career_recommendations(self, skills: List[str], interests: List[str], experience: str) -> Tuple[str, str]:
+    async def get_hf_response(self, prompt: str) -> str:
+        
+        await self.ensure_session()
+        
+        try:
+            async with self.session.post(
+                self.hf_url,
+                json={"inputs": prompt},
+                headers=self.headers,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data[0]['generated_text']
+                
+                error = await resp.text()
+                logging.error(f"HF API error: {resp.status} - {error}")
+                return f"Ошибка API: {error}"
+                
+        except Exception as e:
+            logging.error(f"Connection error: {str(e)}", exc_info=True)
+            return "Ошибка подключения к сервису"
+
+    async def get_career_recommendations(self, skills: List[str], interests: List[str], experience: str) -> str:
         """Генерация рекомендаций по карьере"""
         prompt = f"""
-        Ты карьерный консультант. Сгенерируй 3-5 профессий для человека с:
+        [INST]Ты карьерный консультант. Сгенерируй 3-5 профессий для человека с:
         - Навыки: {', '.join(skills)}
         - Интересы: {', '.join(interests)}
         - Опыт: {experience}
 
         Формат для каждой профессии:
-        • [Название]: [Краткое описание]
-        • Соответствие: [почему подходит]
-        • Перспективы: [возможности роста]
+        • Название: Краткое описание
+        • Соответствие: почему подходит
+        • Перспективы: возможности роста
+        • Что изучить: ключевые навыки
 
-        Вывод на русском языке.
+        Вывод на русском языке.[/INST]
         """
-        return await self.get_ai_response(prompt)
+        return await self.get_hf_response(prompt)
 
-    async def evaluate_profession_fit(self, profession: str, skills: List[str], interests: List[str]) -> Tuple[str, str]:
-        """Оценка соответствия профессии"""
+    async def evaluate_profession_fit(self, profession: str, skills: List[str], interests: List[str]) -> str:
+        
         prompt = f"""
-        Оцени от 1 до 10 насколько профессия {profession} подходит человеку с:
+        [INST]Оцени от 1 до 10 насколько профессия {profession} подходит человеку с:
         - Навыки: {', '.join(skills)}
         - Интересы: {', '.join(interests)}
 
         Формат ответа:
         Оценка: X/10
-        Обоснование: [анализ соответствия]
-        Рекомендации: [что изучить]
+        Обоснование: анализ соответствия
+        Рекомендации: что изучить
+        Перспективы: возможности роста[/INST]
         """
-        return await self.get_ai_response(prompt)
-
-    def _parse_response(self, service: str, data: dict) -> str:
-        try:
-            if service == 'deepseek':
-                return data['choices'][0]['message']['content']
-            elif service == 'huggingface':
-                return data[0]['generated_text']
-        except (KeyError, IndexError) as e:
-            logging.error(f"Ошибка парсинга ответа {service}: {str(e)}")
-        return "Не удалось обработать ответ API"
-
-    def _local_fallback(self, prompt: str) -> str:
-        professions = ["Разработчик ПО", "Аналитик данных", "Дизайнер UX/UI"]
-        return "Локальные рекомендации:\n" + "\n".join(f"- {p}" for p in professions)
+        return await self.get_hf_response(prompt)
 
     async def close(self):
-        if self.session:
+        
+        if self.session and not self.session.closed:
             await self.session.close()
+            logging.info("Сессия aiohttp закрыта")
